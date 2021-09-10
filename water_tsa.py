@@ -8,6 +8,7 @@ Available functions:
     load_shp
     viz2d
     to_map
+    sceneDisplay
     dataMask
     getQual
     vizQual
@@ -52,7 +53,7 @@ import sys
 import cartopy.crs as ccrs
 import warnings
 import holoviews as hv
-hv.extension('bokeh')
+#hv.extension('bokeh')
 hv.extension('matplotlib')
 import cartopy.crs as ccrs
 import os
@@ -62,10 +63,12 @@ import math
 from skimage.filters import threshold_yen
 from skimage.exposure import rescale_intensity
 from skimage.io import imread, imsave
-import holoviews as hv
 import bokeh
 from bokeh.plotting import show
 from bokeh.io import output_notebook
+import panel as pn
+import hvplot.pandas
+pn.extension()
 import rioxarray
 output_notebook
     
@@ -89,7 +92,7 @@ def get_bbox(shp):
     dataset: xr.Dataset
         A list of the bounding box calculated from the input shapefile.
     """
-    if shp[-4:] != ".shp":
+    if os.path.splitext(shp)[1] != ".shp":
         raise ValueError('Input data should be a shapefile.')
     try:
         aoi = gpd.read_file(shp)
@@ -133,7 +136,7 @@ def load_shp(shp, start, end, band=None, by_day=True):
     dataset: xr.Dataset
         A xr.Dataset with only pixels within the bounding box of the input shapefile.
     """
-    if shp[-4:] != ".shp":
+    if os.path.splitext(shp)[1] != ".shp":
         raise ValueError('Input data should be a shapefile.')
         
     try:
@@ -190,9 +193,9 @@ def load_shp(shp, start, end, band=None, by_day=True):
 
 
 def viz2d(ds,
-          r='red',
-          g='green',
-          b='blue'):
+          r_band='red',
+          g_band='green',
+          b_band='blue'):
     """
     Visualize the first time step of the dataset.
     Description
@@ -214,15 +217,13 @@ def viz2d(ds,
         A two dimensional plot in RGB color, either true or false color composites.
     """
     try: 
-        da_rgb = ds.isel(time=0).to_array().rename({"variable": "band"}).sel(band=[r,g,b])
+        da_rgb = ds.isel(time=0).to_array().rename({"variable": "band"}).sel(band=[r_band,g_band,b_band])
     except NameError as error:
         print('Dataset is not defined.')
     except AttributeError as error:
         print('Input data need to be a xarray dataset.')
     except KeyError:
         print('The band(s) cannot be found.')
-    else:
-        print('Unexpected Error.')
         
     #set projection to pre-defined CRS; CRS can be checked using `aoi.crs`
     ax = plt.subplot(projection=ccrs.UTM('33S'))
@@ -237,9 +238,31 @@ def viz2d(ds,
 
 
 ## function for to_map()
-def processing(df,stack,r,g,b):
+def processing(df,stack,r_channel,g_channel,b_channel):
+    """
+    Transform xarray.Dataset to rearranged normalized numpy array for mapping.
+    Description
+    ----------
+    Use custom shapefile to acquire coordinates.
+    Parameters
+    ----------
+    df: xarray.Dataset
+        dataset processed in the function to_map().
+    stack: 3D numpy array
+        array processed in the function to_map().
+    r: int
+        the number of layer to be mapped to red.
+    g: int
+        the number of layer to be mapped to green.
+    b: int
+        the number of layer to be mapped to blue.
+    Returns
+    -------
+    dataset: 3D numpy array
+        Processed and normalized 3D numpy array fits for further processing in to_map().
+    """
     #stack layers
-    stack_new = np.dstack([stack[:,:,r],stack[:,:,g],stack[:,:,b]])
+    stack_new = np.dstack([stack[:,:,r_channel],stack[:,:,g_channel],stack[:,:,b_channel]])
 
     #apply threshold
     yen_thres = threshold_yen(stack_new)
@@ -250,16 +273,35 @@ def processing(df,stack,r,g,b):
     img = cv2.normalize(img_bright, norm, 0, 255, cv2.NORM_MINMAX)
     return img
 
-def to_map(df,output='all',downscale=5, basemap='hybrid'):
-    #rgb: 1,2,3,4,5,all (default)
-    #---- in a drop down list
-    #1: RGB true color composite
-    #2: Urban false color composite
-    #3: Vegetation false color composite
-    #4: Agriculture
-    #5: Land/water
-    
+def to_map(df,output='all',downscale=5,basemap='hybrid',zoom=9):
+    """
+    Display RGB on an interactive map.
+    Description
+    ----------
+    Display xarray.Dataset as RGB in a folium map with multiple false color composites and basemap options.
+    Parameters
+    ----------
+    df: xarray.Dataset
+        dataset with multiple time steps, including bands "red","green","blue","nir", and "swir1".
+    output: string ("all","veg","agri","rgb","water")
+        options for displaying false color composite. Values can be either "all" for all combinations, "veg" for 
+        vegetation (NIR, Red, Green), "argi" for agriculture (SWIR1, NIR, Blue), "rgb" for true color composite (Red, 
+        Green, Blue), and "water" for water (NIR, SWIR1, Red). Defult = "all".
+    downscale: float
+        a floating number > 1 for downscale image resolution. Default = 5.
+    basemap: string ("all","google","terrain","hybrid","esri")
+        the type of basemap to be included in the folium map. Values can be either "google" for Google map, "terrain" for 
+        Google Terrain, "hybrid" for Google Satellite Hybrid, "esri" for ESRI Satellite basemap, and "all" for all 
+        basemap.
+    Returns
+    -------
+    map: Folium Map
+        Folium map with scene displayed as RGB images with layer control.
+    """
+
     #error catching
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     try:
         df.red
         df.green
@@ -269,12 +311,12 @@ def to_map(df,output='all',downscale=5, basemap='hybrid'):
     except Exception:
         print("RGB/NIR/SWIR1 bands not found.")
     
-    r = df.red.isel(time=0).values
-    g = df.green.isel(time=0).values
-    b = df.blue.isel(time=0).values
+    r_band = df.red.isel(time=0).values
+    g_band = df.green.isel(time=0).values
+    b_band = df.blue.isel(time=0).values
     nir = df.nir.isel(time=0).values
     swir1 = df.swir1.isel(time=0).values
-    stack = np.dstack((r,g,b,nir,swir1))
+    stack = np.dstack((r_band,g_band,b_band,nir,swir1))
     
     #create RGB 3D array
     rgb = processing(df,stack,0,1,2)
@@ -328,7 +370,7 @@ def to_map(df,output='all',downscale=5, basemap='hybrid'):
     }
     
     #display layers on map
-    map_ = folium.Map(location=[(min_lat+max_lat)/2, (min_lon+max_lon)/2], zoom_start = 9)
+    map_ = folium.Map(location=[(min_lat+max_lat)/2, (min_lon+max_lon)/2], zoom_start = zoom)
     if basemap == 'all':
         basemaps['Esri Satellite'].add_to(map_)
         basemaps['Google Maps'].add_to(map_)
@@ -340,7 +382,7 @@ def to_map(df,output='all',downscale=5, basemap='hybrid'):
         basemaps['Google Terrain'].add_to(map_)
     elif basemap == 'google':
         basemaps['Google Maps'].add_to(map_)
-    elif basemap == 'ersi':
+    elif basemap == 'esri':
         basemaps['Esri Satellite'].add_to(map_)
     else:
         print("Invalid value for basemap argument: Please input 'esri','google','terrain', or 'hybrid'.")
@@ -401,7 +443,7 @@ def to_map(df,output='all',downscale=5, basemap='hybrid'):
                 water,[[min_lat, min_lon], [max_lat, max_lon]], name='Water'
             ).add_to(map_)
             
-        except Exceptions:
+        except Exception:
             print("Unexpected Error for image overlay.")
             
     elif output == "rgb":
@@ -429,6 +471,47 @@ def to_map(df,output='all',downscale=5, basemap='hybrid'):
 
 
 
+def sceneDisplay(df):
+    """
+    Display RGB time series.
+    Description
+    ----------
+    Display interactive RGB image with a slidebar to control the time step to be displayed.
+    Parameters
+    ----------
+    df: xarray.Dataset
+        dataset with multiple time steps, including bands "red","green", and "blue".
+    Returns
+    -------
+    map: hvplot
+        hvplot displayed in RGB with a slidebar to control time steps.
+    """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
+    try:
+        df[['red','green','blue']]
+    except Excpetions:
+        print("RGB bands cannot be found.")
+    
+    try:
+        df[['longitude','latitude']]
+    except Excpetions:
+        print("'longitude' or/and 'latitude' cannot be found.")
+        
+    df_rgb = df.to_array().rename({"variable": "band"}).sel(band=['red','green','blue'])
+    normalized = df_rgb/(df_rgb.quantile(.99,skipna=True)/255)
+    mask = normalized.where(normalized < 255)
+    int_arr = mask.astype(int)
+    plot = int_arr.astype('uint8').hvplot.rgb(
+        x='longitude', y='latitude', bands='band', data_aspect=1, 
+        flip_yaxis=True, xaxis=False, yaxis=None, groupby='time', 
+        widgets={'time': pn.widgets.DiscreteSlider}
+    )
+    
+    return plot
+
+
+
 def dataMask(df, cloudMask = False):
     """
     Masking pixels in the xarray dataset with poor quality.
@@ -447,6 +530,8 @@ def dataMask(df, cloudMask = False):
         A xr.Dataset like the input dataset with only pixels of good quality.
         Every other pixel is given the value NaN.
     """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     if (df.red == np.nan).any():
         warnings.warn("red band is missing.")
     elif (df.blue == np.nan).any():
@@ -504,6 +589,8 @@ def getQual(df):
     dataQuality: list
         A list of values between 0 and 100 (in %) indicating percentage of good pixels in each time stamp.
     """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     if (df.scl == np.nan).any():
         raise ValueError('dataset should include the scl band for cloud information.')
         
@@ -537,7 +624,7 @@ def getQual(df):
 
 
 
-def vizQual(df, marked_level = 60, type="bar"):
+def vizQual(df, thres = 60, type="bar"):
     """
     Visually check the quality of loaded dataset.
     Description
@@ -547,7 +634,7 @@ def vizQual(df, marked_level = 60, type="bar"):
     ----------
     dataset: xr.Dataset
          A multi-dimensional array with x,y and time dimensions and one or more data variables.
-    marked_level: integer
+    thres: integer
         A threshold of percentage below which data will be marked as poor for each time stamp.
     type: "bar" or "line"
         If "bar", a bar chart will be returned with time stamps below threshold shown in red. If "line", a line chart 
@@ -557,6 +644,8 @@ def vizQual(df, marked_level = 60, type="bar"):
     chart: matplotlib.pyplot
         A bar chart or line chart showing the percentage of good data in every time stamps.
     """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     ls = getQual(df)
     
     try:
@@ -565,8 +654,8 @@ def vizQual(df, marked_level = 60, type="bar"):
         print('Cannot convert data quality to numpy array.')
         
     try:
-        poor_mask = arr < marked_level
-        good_mask = arr >= marked_level
+        poor_mask = arr < thres
+        good_mask = arr >= thres
     except Exception:
         print('Unrecognized "marked level".')
 
@@ -584,9 +673,8 @@ def vizQual(df, marked_level = 60, type="bar"):
         
     elif type == "line":
         try: 
-            plt.plot(np.arange(len(ls))[poor_mask],arr[poor_mask], color = 'red', figure = fig)
             plt.plot(np.arange(len(ls))[good_mask],arr[good_mask], color = 'blue', figure = fig)
-            plt.axhline(y=marked_level, color='r', linestyle='-')
+            plt.axhline(y=thres, color='r', linestyle='-')
             ax.grid(figure = fig)
             plt.legend(["Threshold", "Data Quality"])
         except Expection:
@@ -600,6 +688,10 @@ def vizQual(df, marked_level = 60, type="bar"):
     plt.ylabel("Good Pixel (%)", fontsize = 12.5)
     plt.xlabel("Timestamps", fontsize = 12.5)
     plt.xticks(np.arange(min(len(ls), max(len(ls)+1, 1.0))))
+    plt.tight_layout(pad=0.4,w_pad=0.5,h_pad=1.0)
+    if len(df.time) > 30:
+        for label in ax.xaxis.get_ticklabels()[::2]:
+            label.set_visible(False)
     plt.close()
     
     return fig
@@ -627,6 +719,8 @@ def pred_index(df, resample = '1M', method = "mean", drop_bands = False):
     masked_dataset: xr.Dataset
         A xr.Dataset like the input dataset with resampled data with NDVI and MNDWI as new data variables.
     """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     if (df.nir == np.nan).any():
         warnings.warn("nir band is missing")
         
@@ -671,7 +765,8 @@ def pred_index(df, resample = '1M', method = "mean", drop_bands = False):
     # MNDWI
     try:
         data_resampled = data_resampled.assign(
-            MNDWI = (data_resampled["green"] - data_resampled["swir1"])/(data_resampled["green"] + data_resampled["swir1"])
+            MNDWI = (data_resampled["green"] - data_resampled["swir1"])/
+            (data_resampled["green"] + data_resampled["swir1"])
         )
     except Exception:
         print('Error occurred for MNDWI calculation.')
@@ -679,7 +774,8 @@ def pred_index(df, resample = '1M', method = "mean", drop_bands = False):
     # NDVI
     try:
         data_resampled = data_resampled.assign(
-            NDVI = (data_resampled["nir"] - data_resampled["red"])/(data_resampled["nir"] + data_resampled["red"])
+            NDVI = (data_resampled["nir"] - data_resampled["red"])/
+            (data_resampled["nir"] + data_resampled["red"])
         )
     except Exception:
         print('Error occurred for NDVI calculation.')
@@ -724,6 +820,8 @@ def water_viz(df, col = 4):
     Figure: matplotlib.pyplot
         2D subplots indicating detected water area.
     """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     try:
         df.water
     except Exception:
@@ -756,7 +854,6 @@ def water_viz(df, col = 4):
 
 
 def cloud_calc(df): 
-    #input a dataset with multiple timestamps
     """
     Quantify cloud area.
     Description
@@ -769,8 +866,11 @@ def cloud_calc(df):
     Returns
     -------
     cloud_area: list
-        A list with a length of time steps in the input dataset. The number indicates the area covered by cloud in square kilometers.
+        A list with a length of time steps in the input dataset. 
+        The number indicates the area covered by cloud in square kilometers.
     """    
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     ls = []
     try: 
         ntime = len(df.coords["time"])
@@ -792,7 +892,25 @@ def cloud_calc(df):
     return ls
 
 
+
 def water_ts(df):
+    """
+    Calculated water area.
+    Description
+    ----------
+    Create a new pandas dataframe for detected water area and cloud covered area.
+    Parameters
+    ----------
+    df: xarray.Dataset
+        dataset with multiple time steps.
+    Returns
+    -------
+    map: pandas.DataFrame
+        pandas.DataFrame with two columns: 'water_area_km2' and 'cloud_uncertainty_km2' indexed by time steps. 
+        The areas are in square kilometers.
+    """
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     #calculate cloud uncertainty
     uncertainty = cloud_calc(df)
     
@@ -804,13 +922,11 @@ def water_ts(df):
      
     try:
         water_area = df.water_null.groupby("time").count({"latitude","longitude"}).compute().values * 100 / 1000000
-        #pandas series of water occurence
-        #data_monthly.water.to_series()
 
         month = pd.Series(ts).values #get the series values
-        water = pd.Series(water_area).values #get the series values
+        water = pd.Series(water_area).values
 
-        frame = { 'date': month, 'water_area_km2': water, 'cloud_uncertainty_km2': uncertainty }   #set up a data frame
+        frame = { 'date': month, 'water_area_km2': water, 'cloud_uncertainty_km2': uncertainty } #set up a data frame
         df_new = pd.DataFrame(frame) 
         df_new.index = pd.to_datetime(df_new["date"],format='%Y%m%d') #set up the date time index
         df_new = df_new.drop(columns=["date"]) #drop extra column
@@ -820,11 +936,9 @@ def water_ts(df):
     return df_new
 
 
-def ts_viz(
-    df, 
-    criticalLevel = 0.8, 
-    title = "Surface Waterbodies Timeseries"):
-    # CriticalLevel: between 0 and 1
+def ts_viz(df, thres = 0.8, 
+           uncertainty = False, interpolate = False, interact = False,
+           title = "Surface Waterbodies Timeseries"): 
     """
     Water time series visualization.
     Description
@@ -834,44 +948,110 @@ def ts_viz(
     ----------
     dataset: xr.Dataset
          A multi-dimensional array with x,y and time dimensions and one or more data variables.
-    criticalLevel: float
-        A float between 0 (0%) and 1 (100%). It indicates the percentage of water area compared to the maximum level in the time sreries. It will be used as the threshold used for 
-        highlighting time steps with scarce water reosource.
+    thres: float
+        A float between 0 (0%) and 1 (100%). It indicates the percentage of water area compared to the maximum level in 
+        the time sreries. It will be used as the threshold used for 
+        highlighting time steps with scarce water reosource. If thres = None, no marking will be shown.
     Returns
     -------
     figure: pandas.DataFrame.plot.area
         An area plot showing detected water area across all time stamps in square kilometers.
     """
-    try: 
-        int(criticalLevel)
-    except Exception:
-        print("criticalLevel has to be between 0 and 1.")
-        
+    
+    if thres != None:
+        assert thres >= 0 and thres <= 1,"thres has to be between 0 and 1."
+
     df_new = water_ts(df)
+    
+    if interact == True:
+        if interpolate == True:
+            df_new = df_new.drop(columns=["cloud_uncertainty_km2"])          
+            df_interpolate = df_new.resample('D').asfreq().interpolate(method='polynomial', order=2)
+            df_interpolate.loc[df_interpolate['water_area_km2'] < 0, 'water_area_km2'] = 0
+            fig = df_interpolate.water_area_km2.hvplot().opts(title=title,xlabel="Date",ylabel="Area (km²)")
+        elif interpolate == False:
+            fig = df_new.water_area_km2.hvplot().opts(title=title,xlabel="Date",ylabel="Area (km²)")
+        else:
+            raise ValueError('interpolate should be a boolean.')
+        return fig
+    
+    if thres != None:
+        assert thres >= 0 and thres <= 1,"thres has to be between 0 and 1."
+
+    df_new = water_ts(df)
+    
     #define critical point for water area
-    low = df_new[df_new['water_area_km2'] < df_new['water_area_km2'].max()*criticalLevel].index
+    if thres != None:
+        low = df_new[df_new['water_area_km2'] < df_new['water_area_km2'].max()*thres].index
+        label = r'Highlight: Area $<{}$% of Max'.format(int(thres*100))
     
-    try:
-        fig, ax = plt.subplots() #define name of the plot and the axis
-        df_new.plot.area(figsize=(16, 8), ylim=(df_new.water_area_km2.min()*0.8, df_new.water_area_km2.max()*1.2), title = title, x_compat=True, ax=ax)
-        ax.plot([], [], ' ') #empty plot for the text
+    if interpolate == False:
+        try:
+            fig, ax = plt.subplots() #define name of the plot and the axis
 
-        for i in low:
-            ax.axvspan(i-DateOffset(months=1)+DateOffset(days=1), i-DateOffset(days=1), color='red', alpha=0.45) #highlight the critical months
+            if uncertainty == False:
+                df_new = df_new.drop(columns=["cloud_uncertainty_km2"])
+            else: 
+                pass
+            df_new.plot.area(
+                figsize=(16, 8), 
+                ylim=(df_new.water_area_km2.min()*0.8, 
+                      df_new.water_area_km2.max()*1.2), 
+                title = title, x_compat=True, ax=ax)
+            
+            ax.plot([], [], ' ') #empty plot for the text
 
-        fig.autofmt_xdate()
-    except Exception:
-        print("Cannot plot figure.")
-    
-    label = r'Highlight: Area $<{}$% of Max'.format(int(criticalLevel*100))
+            if thres != None:
+                for i in low:
+                    ax.axvspan(i-DateOffset(months=1)+DateOffset(days=1), i-DateOffset(days=1), 
+                               color='red', alpha=0.3) #highlight the critical months
+
+            fig.autofmt_xdate()
+        except Exception as err:
+            print("Cannot plot figure.",err)
+    elif interpolate == True:
+        try:
+            fig, ax = plt.subplots() #define name of the plot and the axis
+            df_new = df_new.drop(columns=["cloud_uncertainty_km2"])
+            
+            df_interpolate = df_new.resample('D').asfreq().interpolate(method='polynomial', order=2)
+            df_interpolate.loc[df_interpolate['water_area_km2'] < 0, 'water_area_km2'] = 0
+
+            df_interpolate.plot.area(
+                figsize=(16, 8), 
+                ylim=(df_new.water_area_km2.min()*0.8, 
+                      df_new.water_area_km2.max()*1.2), 
+                title = title, x_compat=True, ax=ax)
+            
+            ax.plot([], [], ' ') #empty plot for the text
+
+            if thres != None:
+                for i in low:
+                    ax.axvspan(
+                        i-DateOffset(months=1)+DateOffset(days=1), i-DateOffset(days=1), 
+                        color='red', alpha=0.3) #highlight the critical months
+
+            fig.autofmt_xdate()
+        except Exception as err:
+            print("Cannot plot figure.",err)
+    else:
+        raise ValueError('interpolate should be a boolean.')
+        
     
     ax.set_xlabel("Date", fontsize = 16) #give x labal
     ax.set_ylabel("Detected Water Area (km²)", fontsize = 16) # give y label
-    ax.legend(["Area","Cloud Uncertainty",label], fontsize = 14) #set legend
+    if uncertainty == True:
+        ax.legend(["Area","Cloud Uncertainty",label], fontsize = 14) #set legend
+    elif thres != None:
+        ax.legend(["Area",label], fontsize = 14)
+    else:    
+        ax.legend(["Area"], fontsize = 14)
     ax.title.set_size(18)
     plt.close()
     
     return fig
+
+
 
 def water_gif(ds, 
               fps = 2, 
@@ -888,7 +1068,8 @@ def water_gif(ds,
     fps: int
         Frame per second (default = 2).
     animate: boolean
-        If True, output will be displayed in gif format. If False, a control slider will be display for user to manually visualize changes in different time steps. 
+        If True, output will be displayed in gif format. If False, a control slider will be display for user to manually 
+        visualize changes in different time steps. 
     Returns
     -------
     masked_dataset: xr.Dataset
@@ -902,13 +1083,12 @@ def water_gif(ds,
         
     try:
         ds_new = hv.Dataset(ds.water) #set up dataset for animation
-        images = ds_new.to(hv.Image, ['longitude', 'latitude']).options(fig_inches=(6.5, 5), colorbar=True, cmap=plt.cm.Blues)
+        images = ds_new.to(
+            hv.Image, ['longitude', 'latitude']).options(fig_inches=(6.5, 5), 
+                                                         colorbar=True,
+                                                         cmap=plt.cm.Blues)
     except Exception:
         print("Unexpected Error.")
-        
-#     if download == True:
-#         renderer = hv.renderer('matplotlib')
-#         renderer.save(images, 'hv_anim', 'gif') #save as gif
         
     if animate == True:
         hv.output(images, holomap='gif', fps=fps) #animation output inline
@@ -918,14 +1098,37 @@ def water_gif(ds,
 
 
 def water_freq(df):
+    """
+    Map frequency of water occurence.
+    Description
+    ----------
+    Map how frequent is water detected from the time series in the same pixel.
+    Parameters
+    ----------
+    df: xr.Dataset
+         A multi-dimensional array with x,y and time dimensions includeing data variable "water" calculated from 
+         pred_index().
+    Returns
+    -------
+    masked_dataset: hvplot
+        An interactive hvplot with values between 0 and 1 representing the ratio of time steps with water detected.
+    """
+    
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     try:
         df.water
-    except Exceptions:
+    except Exception:
         print("'water' band cannot be found. Please use pred_index() to acquire the required band.")
     try:
         df.time
-    except Exceptions:
+    except Exception:
         print("'time' cannot be found. Please check the time dimension of the dataset.")
+    try:
+        df.longitude
+        df.latitude
+    except Exception:
+        print("'longitude' or/and 'latitude' cannot be found. Please check the dimension of the dataset.")
         
     frequency = df.water.sum(dim='time',skipna=True)/len(df.time)
     show(hv.render(frequency.hvplot.image(x="longitude",y="latitude",aspect=1,cmap='bmy_r')))
@@ -933,13 +1136,33 @@ def water_freq(df):
 
 
 def export_freq(df,path):
+    """
+    Export water occurence frequency.
+    Description
+    ----------
+    Export the results for water occurence frequency in geotiff format.
+    Parameters
+    ----------
+    df: xr.Dataset
+         A multi-dimensional array with x,y and time dimensions and one or more data variables.
+    path: path
+        A path for downloading geotiff file, including file name and data format (.tif). 
+    Returns
+    -------
+    geotiff: geotiff
+        A raster file (.tif) displaying results from water_freq(). Values range from 0 to 1, representing the time 
+        proportion with water present.
+    """
+    
+    assert isinstance(df, xr.Dataset),"Input has to be a xarray.Dataset."
+    
     try:
         df.water
-    except Exceptions:
+    except Exception:
         print("'water' band cannot be found. Please use pred_index() to acquire the required band.")
     try:
         df.time
-    except Exceptions:
+    except Exception:
         print("'time' cannot be found. Please check the time dimension of the dataset.")
         
     frequency = df.water.sum(dim='time',skipna=True)/len(df.time)
